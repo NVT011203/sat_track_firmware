@@ -8,3 +8,5 @@ set(EXTRA_COMPONENT_DIRS "common/calc" "common/gps" "common/qmc5883l" "common/mp
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(sat)
+
+target_add_binary_data(sat.elf "main/mqtt_eclipseprojects_io.pem" TEXT)
