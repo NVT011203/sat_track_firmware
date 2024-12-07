@@ -2,8 +2,8 @@
 #define I2C_INIT
 
 // Include libraries
-#include "driver/i2c_master.h"
 #include "driver/i2c.h"
+#include "driver/i2c_master.h"
 
 // Define
 #define I2C_TAG "I2C"

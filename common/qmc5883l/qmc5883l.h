@@ -2,11 +2,11 @@
 #define QMC5883L
 
 // Include libraries
-#include <stdio.h>
-#include "esp_err.h"
-#include "driver/i2c_master.h"
 #include "driver/i2c.h"
+#include "driver/i2c_master.h"
+#include "esp_err.h"
 #include "esp_log.h"
+#include <stdio.h>
 
 #define QMC5883L_ADDRESS 0x0D // I2C address of QMC5883L
 // QMC5883L register addresses
@@ -22,23 +22,24 @@
 
 // Define new error check function
 #undef ESP_ERROR_CHECK
-#define ESP_ERROR_CHECK(x)                         \
-    do                                             \
-    {                                              \
-        esp_err_t rc = (x);                        \
-        if (rc != ESP_OK)                          \
-        {                                          \
-            ESP_LOGE("err", "esp_err_t = %d", rc); \
-            assert(0 && #x);                       \
-        }                                          \
-    } while (0);
+#define ESP_ERROR_CHECK(x)                                                     \
+  do {                                                                         \
+    esp_err_t rc = (x);                                                        \
+    if (rc != ESP_OK) {                                                        \
+      ESP_LOGE("err", "esp_err_t = %d", rc);                                   \
+      assert(0 && #x);                                                         \
+    }                                                                          \
+  } while (0);
 
 // QMC5883L function
 #define QMC_TAG "QMC5883L"
-esp_err_t qmc5883l_write_byte(uint8_t reg_addr, uint8_t data, uint8_t I2C_MASTER_PORT);              // Hàm ghi dữ liệu vào thanh ghi của QMC5883L
-esp_err_t qmc5883l_read_bytes(uint8_t reg_addr, uint8_t *data, size_t len, uint8_t I2C_MASTER_PORT); // Hàm đọc dữ liệu từ thanh ghi của QMC5883L
-void qmc5883l_init();                                                                                // Khởi tạo QMC5883L
-void qmc5883l_read_magnetometer(int16_t *x, int16_t *y, int16_t *z);                                 // Đọc giá trị từ trường từ QMC5883L
+esp_err_t qmc5883l_write_byte(uint8_t reg_addr, uint8_t data,
+                              uint8_t I2C_MASTER_PORT); // Write function
+esp_err_t qmc5883l_read_bytes(uint8_t reg_addr, uint8_t *data, size_t len,
+                              uint8_t I2C_MASTER_PORT); // Read function
+void qmc5883l_init();                                   // Init QMC5883L
+void qmc5883l_read_magnetometer(int16_t *x, int16_t *y,
+                                int16_t *z); // Read magnetic from QMC5883L
 
 // End
 #endif

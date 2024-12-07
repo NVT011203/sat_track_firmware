@@ -1,7 +1,7 @@
 #include "sg90.h"
 
 // Calculate pusle width from angle
-uint32_t calculate_pulse_width(uint32_t angle) {
+static uint32_t calculate_pulse_width(uint32_t angle) {
   uint32_t pulse_width =
       SERVO_MIN_PULSEWIDTH +
       ((SERVO_MAX_PULSEWIDTH - SERVO_MIN_PULSEWIDTH) * angle) /
@@ -10,8 +10,8 @@ uint32_t calculate_pulse_width(uint32_t angle) {
 }
 
 // Set angle for servo
-void servo_set_angle(mcpwm_unit_t mcpwm_num, mcpwm_timer_t timer_num,
-                     uint32_t angle) {
+static void servo_set_angle(mcpwm_unit_t mcpwm_num, mcpwm_timer_t timer_num,
+                            uint32_t angle) {
   uint32_t pulse_width = calculate_pulse_width(angle);
   mcpwm_set_duty_in_us(mcpwm_num, timer_num, MCPWM_OPR_A, pulse_width);
 }

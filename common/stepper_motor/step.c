@@ -1,7 +1,7 @@
 #include "step.h"
 
 void stepper_motor_init() {
-  // Cấu hình GPIO
+  // Config
   gpio_config_t io_conf = {.pin_bit_mask = (1ULL << DIR_PIN) |
                                            (1ULL << STEP_PIN) |
                                            (1ULL << ENABLE_PIN),
@@ -11,8 +11,7 @@ void stepper_motor_init() {
                            .intr_type = GPIO_INTR_DISABLE};
   gpio_config(&io_conf);
 
-  // Kích hoạt driver
-  gpio_set_level(ENABLE_PIN, 0); // 0 để kích hoạt
+  gpio_set_level(ENABLE_PIN, 0); // Enable driver
   setup_microstepping_mode();
 }
 
@@ -31,22 +30,21 @@ void setup_microstepping_mode() {
 }
 
 void rotate_motor(float angle, int direction) {
-  int steps = (int)(angle / ANGLE_PER_STEP); // Tính số bước cần quay
+  int steps = (int)round(angle / ANGLE_PER_STEP);
+
   printf("Rotating %.2f° (%d steps) in direction %d\n", angle, steps,
          direction);
 
-  // Đặt hướng quay
+  // Set direction
   gpio_set_level(DIR_PIN, direction);
 
-  // Phát xung STEP
+  // Rotate
   for (int i = 0; i < steps; i++) {
     gpio_set_level(STEP_PIN, 1);
-    esp_rom_delay_us(STEP_DELAY_US); // Delay giữa các xung
+    esp_rom_delay_us(STEP_DELAY_US); // Delay
     gpio_set_level(STEP_PIN, 0);
     esp_rom_delay_us(STEP_DELAY_US);
   }
 }
 
-void test_step() {
-  rotate_motor(90.0, 1); // Quay 90° theo chiều kim đồng hồ
-}
+void test_step() { rotate_motor(90.0, 1); }

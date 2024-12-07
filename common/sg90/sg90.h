@@ -8,7 +8,6 @@
 #include "soc/mcpwm_periph.h"
 #include <stdio.h>
 
-
 #define SERVO_MIN_PULSEWIDTH 500  // Độ rộng xung tối thiểu (0.5ms) - Góc 0°
 #define SERVO_MAX_PULSEWIDTH 2500 // Độ rộng xung tối đa (2.5ms) - Góc 180°
 #define SERVO_MAX_DEGREE 180      // Góc quay tối đa của servo
