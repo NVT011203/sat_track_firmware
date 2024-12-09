@@ -39,10 +39,6 @@ typedef struct {
   double azimuth;
 } Angles;
 
-typedef struct {
-  Angles *angles;
-} Sat_Angles;
-
 // Calc roll, pith, yaw
 // Euler_angles Calc_Roll_Pitch_Yaw(Sensor_data *accel, Sensor_data *mag);
 Euler_angles Calc_Roll_Pitch_Yaw(Sensor_data *accel);

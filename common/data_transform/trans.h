@@ -5,21 +5,28 @@
 #include <stdio.h>
 #include <string.h>
 
+#include "euler_angles.h"
+
 typedef char mqtt_data[255];
+typedef char sat_data_set[1000];
 
-// Euler angles
-// typedef struct {
-//   double roll;
-//   double pitch;
-//   double yaw;
-// } Euler_angles;
+typedef struct {
+  int time;
+  float elevation;
+  float azimuth;
+} Sat_data_angles;
 
-// // Calc roll, pith, yaw function
-// Euler_angles Calc_Roll_Pitch_Yaw(Sensor_data *accel, Sensor_data *mag);
-// // Calc elevation and azimuth
-// Angles calc_anten_angles(Euler_angles track);
-// // Sensor_data ECEF_Transformation(double longitude, double latitude,
-// //                                 double altitude);
-// Angles calc_target_angles(LLA_Coordinates track, LLA_Coordinates sat);
+// Satellite data
+typedef struct {
+  float start_azimuth;
+  float start_elevation;
+  int time_to_start;
+} Satellite_data;
+
+Satellite_data data_trans(sat_data_set mqtt_data_receive,
+                          Sat_data_angles *angles);
+void update_sat_angles(sat_data_set mqtt_data_receive, Sat_data_angles *angles);
+int find_angles(long long int time, Sat_data_angles *data_angles,
+                Sat_data_angles *data_angle);
 
 #endif

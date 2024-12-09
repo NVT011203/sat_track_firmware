@@ -16,6 +16,7 @@
 #include <FreeRTOS/queue.h>
 #include <FreeRTOS/semphr.h>
 #include <FreeRTOS/task.h>
+#include <stdbool.h>
 
 #include <math.h>
 #include <stddef.h>
@@ -47,13 +48,16 @@ static const char *MQTT_TAG = "MQTT";
 static const char *WIFI_TAG = "WIFI";
 static const char *TIMER_TAG = "GPTimer";
 static const char *SG90_TAG = "SG90";
+static const char *SET_SAT_TAG = "Set Satellite";
+static const char *TIME_TAG = "Time";
 #define WIFI_SSID "NVT"      // Wifi ssid
 #define WIFI_PASS "12345678" // Wifi password
 #define RECEIVE_TOPIC "/topic/tle"
 #define SEND_TOPIC "/topic/sat_data"
-#define SAT_ANGLES_TOPIC "/topic/sat_angles"
+#define UPDATE_ANGLES_TOPIC "/topic/update_angles"
 #define CHECK_TRACK "/topic/check_track"
 #define CHECK_SERVER "/topic/check_server"
+#define SET_SAT "/topic/set_sat"
 
 #define SERVO_MIN_PULSEWIDTH 500  // Độ rộng xung tối thiểu (0.5ms) - Góc 0°
 #define SERVO_MAX_PULSEWIDTH 2500 // Độ rộng xung tối đa (2.5ms) - Góc 180°
@@ -65,18 +69,22 @@ static const char *SG90_TAG = "SG90";
 // Global variable start
 esp_mqtt_client_handle_t client;
 SemaphoreHandle_t mqttMutex;
-QueueHandle_t test_queue;
+QueueHandle_t set_sat_queue;
+QueueHandle_t update_angles_queue;
 esp_timer_handle_t periodic_timer;
-Angles sat_angles = {45, 45}; // Test angles
+bool set_sat = false;
+bool is_updating = false;
+Sat_data_angles sat_angles[34];
+Satellite_data start_angles = {};
 double sg90_angle_declination = 0;
-int8_t steps = 0;
-bool wifi_connected = false;
+int steps = 0;
+time_t now;
+struct tm timeinfo;
 // End
 
 // Wifi start
 const int WIFI_CONNECTED_BIT = BIT0;
-const int CHECK_TRACK_BIT = BIT1;
-const int SET_ANGLES_BIT = BIT2;
+const int SET_SAT_BIT = BIT1;
 static EventGroupHandle_t event_group;
 static EventGroupHandle_t wifi_event_group;
 void wifi_event_handler(void *arg, esp_event_base_t event_base,
@@ -109,11 +117,17 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
 static void mqtt_app_start(void);
 // MQTT end
 
+// Set up satellite
+void set_satellite(sat_data_set message);
+
 // Timer start
 // Timer callback function
 void timer_callback(void *arg);
-void timer_start();
+void timer_init();
 // Timer end
+
+// Set time
+void initialize_sntp();
 
 // I2C init
 void i2c_init();
@@ -126,26 +140,11 @@ void sg90_reset_angle();
 
 // Task function
 void mqtt_task(void *pvParameters);
-void Test_task(void *pvParameters) {
-  while (1) {
-    printf("Moving to 0°\n");
-    servo_set_angle(MCPWM_UNIT_0, MCPWM_TIMER_0, 0);
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Chờ 1 giây
-
-    printf("Moving to 90°\n");
-    servo_set_angle(MCPWM_UNIT_0, MCPWM_TIMER_0, 90);
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Chờ 1 giây
-
-    printf("Moving to 180°\n");
-    servo_set_angle(MCPWM_UNIT_0, MCPWM_TIMER_0, 180);
-    vTaskDelay(pdMS_TO_TICKS(1000)); // Chờ 1 giây
-  }
-}
-
 // App main
 void app_main(void) {
   // Create queue
-  test_queue = xQueueCreate(2, 100);
+  set_sat_queue = xQueueCreate(1, sizeof(sat_data_set));
+  update_angles_queue = xQueueCreate(1, sizeof(sat_data_set));
   // Create group
   event_group = xEventGroupCreate();
   wifi_event_group = xEventGroupCreate();
@@ -191,53 +190,123 @@ void app_main(void) {
   sg90_reset_angle();
 
   // Start timer
-  timer_start();
-
+  timer_init();
+  // Set time
+  initialize_sntp();
   // Mqtt task in core 2
   xTaskCreatePinnedToCore(mqtt_task, "mqtt_task", 4096, NULL, 5, NULL,
                           MQTT_CORE_ID);
-  // xTaskCreate(get_time, "get_time", 2048, NULL, 2, NULL);
+  // xTaskCreate(get_time, "get_time", 2048, NULL, 10, NULL);
+}
+
+// Set up satellite
+void set_satellite(sat_data_set message) {
+  if (xSemaphoreTake(mqttMutex, portMAX_DELAY) == pdTRUE) {
+    esp_timer_stop(periodic_timer);
+    ESP_LOGI(TIMER_TAG, "Periodic timer stopped");
+    ESP_LOGI(SET_SAT_TAG, "Set new satellite...");
+    Satellite_data sat_data = data_trans(message, sat_angles);
+    start_angles.time_to_start = sat_data.time_to_start;
+    start_angles.start_elevation = sat_data.start_elevation;
+    start_angles.start_azimuth = sat_data.start_azimuth;
+
+    printf("Time to start: %d\n", start_angles.time_to_start);
+    printf("Start elevation: %f\n", start_angles.start_elevation);
+    printf("Start azimuth: %f\n", start_angles.start_azimuth);
+
+    for (int i = 0; i < 34; i++) {
+      printf("Time: %d\n", sat_angles[i].time);
+      printf("Elevation: %f\n", sat_angles[i].elevation);
+      printf("Azimuth: %f\n", sat_angles[i].azimuth);
+    }
+
+    ESP_LOGI(SET_SAT_TAG, "OK");
+    ESP_LOGI(TIMER_TAG, "Periodic timer started, 1s interval");
+    xSemaphoreGive(mqttMutex);
+    ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000000));
+  }
 }
 
 // Timer start
 void timer_callback(void *arg) {
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
-  if (xSemaphoreTakeFromISR(mqttMutex, &xHigherPriorityTaskWoken) == pdTRUE) {
-    // int msg_id;
-    // mqtt_data message = "Test message";
-    // if ((int8_t)(round(esp_timer_get_time() / 1000000)) % 10 == 0) {
-    //   msg_id = esp_mqtt_client_publish(client, SEND_TOPIC, message, 0, 0, 0);
-    //   ESP_LOGI(TAG, "Message id %d sent!", msg_id);
-    //   printf("Counter: %d\n", (int8_t)(round(esp_timer_get_time() /
-    //   1000000)));
-    // }
+  time(&now);
+  localtime_r(&now, &timeinfo);
+  Sat_data_angles data_angle;
+  if (set_sat) {
+    if (xSemaphoreTakeFromISR(mqttMutex, &xHigherPriorityTaskWoken) == pdTRUE) {
+      int status = find_angles(now, sat_angles, &data_angle);
+      if (status == 1 || status == 2) {
+        printf("Found data in time: %d\n", data_angle.time);
+        if (is_updating && status == 2) {
+          sat_data_set update_sat_message;
+          xQueueReceiveFromISR(update_angles_queue, update_sat_message,
+                               &xHigherPriorityTaskWoken);
+          Satellite_data sat_data = data_trans(update_sat_message, sat_angles);
 
-    Euler_angles angles = get_sen_data();
-    // Reset servo to 0 degree
-    servo_set_angle(MCPWM_UNIT_0, MCPWM_TIMER_0, 0);
-    // servo_set_angle(MCPWM_UNIT_0, MCPWM_TIMER_0,
-    //                 (int)abs(round(-angles.pitch)));
-    vTaskDelay(pdMS_TO_TICKS(100));
+          for (int i = 0; i < 34; i++) {
+            printf("Time: %d\n", sat_angles[i].time);
+            printf("Elevation: %f\n", sat_angles[i].elevation);
+            printf("Azimuth: %f\n", sat_angles[i].azimuth);
+          }
 
-    ESP_LOGI(TAG, "Elevation: %lf, Azimuth: %lf", -angles.pitch, -angles.yaw);
-    xSemaphoreGiveFromISR(mqttMutex, &xHigherPriorityTaskWoken);
-    vTaskDelay(pdMS_TO_TICKS(400));
+          ESP_LOGI(SET_SAT_TAG, "Satellite angles updated!!!!!!!!!!!!!!!!!!!");
+          is_updating = false;
+          set_sat = true;
+          if (is_updating) {
+            ESP_LOGI(TAG, "Please update new angles!");
+          }
+        }
+        Euler_angles angles = get_sen_data();
+        int time = (int)round(esp_timer_get_time() / 1000000);
+        ESP_LOGI(TAG, "Time: %d", time);
+        if (abs((int)round(angles.pitch - data_angle.elevation)) >= 1) {
+          servo_set_angle(MCPWM_UNIT_0, MCPWM_TIMER_0,
+                          (int)(data_angle.elevation - sg90_angle_declination));
+        }
+        if (steps * ANGLE_PER_STEP - data_angle.azimuth > ANGLE_PER_STEP) {
+          rotate_motor(
+              fabs((float)(steps * ANGLE_PER_STEP - data_angle.azimuth)), 0,
+              &steps);
+        } else if (steps * ANGLE_PER_STEP - data_angle.azimuth <
+                   -ANGLE_PER_STEP) {
+          rotate_motor(
+              fabs((float)(-steps * ANGLE_PER_STEP + data_angle.azimuth)), 1,
+              &steps);
+        }
+        ESP_LOGI(TAG, "Elevation: %lf, Azimuth: %lf", angles.pitch, angles.yaw);
+        xSemaphoreGiveFromISR(mqttMutex, &xHigherPriorityTaskWoken);
+      } else if (status == 0) {
+        servo_set_angle(MCPWM_UNIT_0, MCPWM_TIMER_0, 0);
+        rotate_motor(fabs((float)(steps * ANGLE_PER_STEP)), 0, &steps);
+        set_sat = false;
+        printf("Set set_sat = false????????????????????????");
+        esp_timer_stop(periodic_timer);
+      }
+    }
+  } else {
+    ESP_LOGI(TIMER_TAG, "Please set satellite!");
+    printf("Set sat: %d\n", set_sat);
   }
 }
 
 // Timer start
-void timer_start() {
+void timer_init() {
   esp_timer_create_args_t timer_config = {.callback = &timer_callback,
                                           .arg = NULL,
                                           .dispatch_method = ESP_TIMER_TASK,
                                           .name = "periodic_timer"};
 
   ESP_ERROR_CHECK(esp_timer_create(&timer_config, &periodic_timer));
-
-  ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000000));
-  ESP_LOGI(TIMER_TAG, "Periodic timer started, 1s interval");
 }
 // Timer end
+
+// Set time
+void initialize_sntp() {
+  sntp_setoperatingmode(SNTP_OPMODE_POLL);
+  sntp_setservername(0, "pool.ntp.org");
+  sntp_init();
+}
 
 // I2C init
 void i2c_init() {
@@ -269,6 +338,7 @@ Euler_angles get_sen_data() {
            angles.roll, angles.pitch, angles.yaw);
   // snprintf(message, sizeof(message), "{Elevation: %lf, Azimuth: %lf}",
   //          result.elevation, result.azimuth);
+  angles.pitch = -angles.pitch;
   return angles;
 }
 
@@ -331,6 +401,7 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
   esp_mqtt_event_handle_t event = event_data;
   esp_mqtt_client_handle_t client = event->client;
   int msg_id;
+  sat_data_set message;
   switch ((esp_mqtt_event_id_t)event_id) {
   case MQTT_EVENT_CONNECTED:
     ESP_LOGI(TAG, "MQTT_EVENT_CONNECTED");
@@ -341,13 +412,16 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
     msg_id = esp_mqtt_client_subscribe(client, SEND_TOPIC, 0);
     ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
     // Subcribe satellite angles topic
-    msg_id = esp_mqtt_client_subscribe(client, SAT_ANGLES_TOPIC, 0);
+    msg_id = esp_mqtt_client_subscribe(client, UPDATE_ANGLES_TOPIC, 0);
     ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
-    // Subcribe satellite angles topic
+    // Subcribe check tracker topic
     msg_id = esp_mqtt_client_subscribe(client, CHECK_TRACK, 0);
     ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
-    // Subcribe satellite angles topic
+    // Subcribe check server topic
     msg_id = esp_mqtt_client_subscribe(client, CHECK_SERVER, 0);
+    ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+    // Subcribe set satellite topic
+    msg_id = esp_mqtt_client_subscribe(client, SET_SAT, 0);
     ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
     break;
@@ -372,24 +446,26 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
     if (memcmp(event->topic, RECEIVE_TOPIC, event->topic_len) == 0) {
       printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
       printf("DATA=%.*s\r\n", event->data_len, event->data);
-    } else if (memcmp(event->topic, SAT_ANGLES_TOPIC, event->topic_len) == 0) {
+    } else if (memcmp(event->topic, UPDATE_ANGLES_TOPIC, event->topic_len) ==
+               0) {
       printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
       printf("DATA=%.*s\r\n", event->data_len, event->data);
-
+      memcpy(message, event->data, event->data_len);
+      xQueueSend(update_angles_queue, message, portMAX_DELAY);
+      is_updating = true;
     } else if (memcmp(event->topic, CHECK_TRACK, event->topic_len) == 0) {
       printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
       printf("DATA=%.*s\r\n", event->data_len, event->data);
-      if (memcmp(event->data, "CHECK", 5) == 0) {
-        xEventGroupSetBits(event_group, CHECK_TRACK_BIT);
-      }
     } else if (memcmp(event->topic, CHECK_SERVER, event->topic_len) == 0) {
       printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
       printf("DATA=%.*s\r\n", event->data_len, event->data);
+    } else if (memcmp(event->topic, SET_SAT, event->topic_len) == 0) {
+      printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+      printf("DATA=%.*s\r\n", event->data_len, event->data);
+      memcpy(message, event->data, event->data_len);
+      xQueueSend(set_sat_queue, message, portMAX_DELAY);
+      xEventGroupSetBits(event_group, SET_SAT_BIT);
     }
-    // else {
-    //   printf("OTHER_TOPIC=%.*s\r\n", event->topic_len, event->topic);
-    //   printf("OTHER_DATA=%.*s\r\n", event->data_len, event->data);
-    // }
     break;
   case MQTT_EVENT_ERROR:
     ESP_LOGI(TAG, "MQTT_EVENT_ERROR");
@@ -427,17 +503,17 @@ static void mqtt_app_start(void) {
 void mqtt_task(void *pvParameters) {
   // Mqtt start
   mqtt_app_start();
-  int msg_id;
-  mqtt_data message = "OK";
+  // int msg_id;
+  // mqtt_data message;
   while (1) {
-    xEventGroupWaitBits(event_group, CHECK_TRACK_BIT, pdFALSE, pdTRUE,
+    xEventGroupWaitBits(event_group, SET_SAT_BIT, pdFALSE, pdTRUE,
                         portMAX_DELAY);
-    if (xSemaphoreTake(mqttMutex, portMAX_DELAY) == pdTRUE) {
-      msg_id = esp_mqtt_client_publish(client, CHECK_TRACK, message, 0, 0, 0);
-      xEventGroupClearBits(event_group, CHECK_TRACK_BIT);
-      ESP_LOGI(MQTT_TAG, "Message id %d sent!", msg_id);
-      xSemaphoreGive(mqttMutex);
-    }
+    sat_data_set set_sat_message;
+    xQueueReceive(set_sat_queue, set_sat_message, pdMS_TO_TICKS(portMAX_DELAY));
+    set_satellite(set_sat_message);
+    set_sat = true;
+    ESP_LOGI(MQTT_TAG, "Set satellite");
+    xEventGroupClearBits(event_group, SET_SAT_BIT);
     vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }
