@@ -36,14 +36,22 @@ Satellite_data data_trans(sat_data_set mqtt_data_receive,
 
 int find_angles(long long int time, Sat_data_angles *data_angles,
                 Sat_data_angles *data_angle) {
+  printf("data_angle: %d, current_time: %lld\n", data_angles[0].time, time);
+  if (data_angles[0].time > time) {
+    printf("TRUEEEEEEEEEEEE");
+    return 0;
+  }
   for (int i = 0; i < 34; i++) {
     if (data_angles[i].time == time) {
       *data_angle = data_angles[i];
       if (i >= 32) {
         return 2;
+      } else if (data_angles[i].elevation < 0) {
+        printf("Angles < 0!!!!!!!!!!!!");
+        return -1;
       }
       return 1;
     }
   }
-  return 0;
+  return -1;
 }

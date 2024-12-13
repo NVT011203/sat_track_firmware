@@ -4,7 +4,7 @@
 # CMakeLists in this exact order for cmake to work correctly
 cmake_minimum_required(VERSION 3.16)
 
-set(EXTRA_COMPONENT_DIRS "common/calc" "common/gps" "common/qmc5883l" "common/mpu9250" "common/i2c" "common/kalman_filter" "common/stepper_motor" "common/data_transform")
+set(EXTRA_COMPONENT_DIRS "common/calc" "common/gps" "common/qmc5883l" "common/mpu9250" "common/i2c" "common/stepper_motor" "common/data_transform" "common/sx1278")
 include($ENV{IDF_PATH}/tools/cmake/project.cmake)
 
 project(sat)

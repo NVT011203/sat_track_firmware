@@ -58,6 +58,7 @@ static const char *TIME_TAG = "Time";
 #define CHECK_TRACK "/topic/check_track"
 #define CHECK_SERVER "/topic/check_server"
 #define SET_SAT "/topic/set_sat"
+#define STOP_TOPIC "/topic/stop"
 
 #define SERVO_MIN_PULSEWIDTH 500  // Độ rộng xung tối thiểu (0.5ms) - Góc 0°
 #define SERVO_MAX_PULSEWIDTH 2500 // Độ rộng xung tối đa (2.5ms) - Góc 180°
@@ -71,6 +72,7 @@ esp_mqtt_client_handle_t client;
 SemaphoreHandle_t mqttMutex;
 QueueHandle_t set_sat_queue;
 QueueHandle_t update_angles_queue;
+QueueHandle_t gps_queue;
 esp_timer_handle_t periodic_timer;
 bool set_sat = false;
 bool is_updating = false;
@@ -80,13 +82,16 @@ double sg90_angle_declination = 0;
 int steps = 0;
 time_t now;
 struct tm timeinfo;
+bool timer_is_running = false;
 // End
 
 // Wifi start
 const int WIFI_CONNECTED_BIT = BIT0;
 const int SET_SAT_BIT = BIT1;
+// const int STOP_BIT = BIT2;
 static EventGroupHandle_t event_group;
 static EventGroupHandle_t wifi_event_group;
+// static EventGroupHandle_t stop_event_group;
 void wifi_event_handler(void *arg, esp_event_base_t event_base,
                         int32_t event_id, void *event_data);
 void wifi_init_sta();
@@ -119,35 +124,34 @@ static void mqtt_app_start(void);
 
 // Set up satellite
 void set_satellite(sat_data_set message);
-
 // Timer start
 // Timer callback function
 void timer_callback(void *arg);
 void timer_init();
 // Timer end
-
 // Set time
 void initialize_sntp();
-
 // I2C init
 void i2c_init();
-
 // Read data sensor functions
 Euler_angles get_sen_data();
-
 // Calculate declination angle and reset
-void sg90_reset_angle();
-
+void set_up_track();
 // Task function
 void mqtt_task(void *pvParameters);
+void gps_task(void *pvParameters);
+// void stop_task(void *pvParameters);
+
 // App main
 void app_main(void) {
   // Create queue
   set_sat_queue = xQueueCreate(1, sizeof(sat_data_set));
   update_angles_queue = xQueueCreate(1, sizeof(sat_data_set));
+  gps_queue = xQueueCreate(1, sizeof(gps_data_t));
   // Create group
   event_group = xEventGroupCreate();
   wifi_event_group = xEventGroupCreate();
+  // stop_event_group = xEventGroupCreate();
   mqttMutex = xSemaphoreCreateMutex();
   // Config mqtt
   ESP_LOGI(TAG, "[APP] Startup..");
@@ -184,10 +188,11 @@ void app_main(void) {
   // Qmc5883l init
   // qmc5883l_init();
   // Init rotator
+  gps_uart_init();
   sg90_init();
   stepper_motor_init();
   // Reset angles
-  sg90_reset_angle();
+  set_up_track();
 
   // Start timer
   timer_init();
@@ -196,13 +201,20 @@ void app_main(void) {
   // Mqtt task in core 2
   xTaskCreatePinnedToCore(mqtt_task, "mqtt_task", 4096, NULL, 5, NULL,
                           MQTT_CORE_ID);
-  // xTaskCreate(get_time, "get_time", 2048, NULL, 10, NULL);
+  xTaskCreatePinnedToCore(gps_task, "gps_task", 2048, NULL, 5, NULL,
+                          MQTT_CORE_ID);
+  // xTaskCreatePinnedToCore(stop_task, "stop_task", 1024, NULL, 1, NULL,
+  //                         MQTT_CORE_ID);
+  // xTaskCreate(stop_task, "stop", 1024, NULL, 5, NULL);
 }
 
 // Set up satellite
 void set_satellite(sat_data_set message) {
   if (xSemaphoreTake(mqttMutex, portMAX_DELAY) == pdTRUE) {
-    esp_timer_stop(periodic_timer);
+    if (timer_is_running) {
+      esp_timer_stop(periodic_timer);
+      timer_is_running = false;
+    }
     ESP_LOGI(TIMER_TAG, "Periodic timer stopped");
     ESP_LOGI(SET_SAT_TAG, "Set new satellite...");
     Satellite_data sat_data = data_trans(message, sat_angles);
@@ -214,6 +226,21 @@ void set_satellite(sat_data_set message) {
     printf("Start elevation: %f\n", start_angles.start_elevation);
     printf("Start azimuth: %f\n", start_angles.start_azimuth);
 
+    servo_set_angle(
+        MCPWM_UNIT_0, MCPWM_TIMER_0,
+        (int)(start_angles.start_elevation - sg90_angle_declination));
+
+    if (steps * ANGLE_PER_STEP - start_angles.start_azimuth > ANGLE_PER_STEP) {
+      rotate_motor(
+          fabs((float)(steps * ANGLE_PER_STEP - start_angles.start_azimuth)), 0,
+          &steps);
+    } else if (steps * ANGLE_PER_STEP - start_angles.start_azimuth <
+               -ANGLE_PER_STEP) {
+      rotate_motor(
+          fabs((float)(-steps * ANGLE_PER_STEP + start_angles.start_azimuth)),
+          1, &steps);
+    }
+
     for (int i = 0; i < 34; i++) {
       printf("Time: %d\n", sat_angles[i].time);
       printf("Elevation: %f\n", sat_angles[i].elevation);
@@ -222,6 +249,7 @@ void set_satellite(sat_data_set message) {
 
     ESP_LOGI(SET_SAT_TAG, "OK");
     ESP_LOGI(TIMER_TAG, "Periodic timer started, 1s interval");
+    timer_is_running = true;
     xSemaphoreGive(mqttMutex);
     ESP_ERROR_CHECK(esp_timer_start_periodic(periodic_timer, 1000000));
   }
@@ -229,6 +257,7 @@ void set_satellite(sat_data_set message) {
 
 // Timer start
 void timer_callback(void *arg) {
+  printf("CAllBACK!!!!!!!!!!!");
   BaseType_t xHigherPriorityTaskWoken = pdFALSE;
   time(&now);
   localtime_r(&now, &timeinfo);
@@ -275,14 +304,19 @@ void timer_callback(void *arg) {
               &steps);
         }
         ESP_LOGI(TAG, "Elevation: %lf, Azimuth: %lf", angles.pitch, angles.yaw);
-        xSemaphoreGiveFromISR(mqttMutex, &xHigherPriorityTaskWoken);
-      } else if (status == 0) {
+      } else if (status == -1) {
         servo_set_angle(MCPWM_UNIT_0, MCPWM_TIMER_0, 0);
         rotate_motor(fabs((float)(steps * ANGLE_PER_STEP)), 0, &steps);
         set_sat = false;
-        printf("Set set_sat = false????????????????????????");
-        esp_timer_stop(periodic_timer);
+        if (timer_is_running) {
+          esp_timer_stop(periodic_timer);
+          timer_is_running = false;
+        }
+      } else if (status == 0) {
+        printf("Wait for satellite. Time to start: %d",
+               start_angles.time_to_start);
       }
+      xSemaphoreGiveFromISR(mqttMutex, &xHigherPriorityTaskWoken);
     }
   } else {
     ESP_LOGI(TIMER_TAG, "Please set satellite!");
@@ -423,6 +457,9 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
     // Subcribe set satellite topic
     msg_id = esp_mqtt_client_subscribe(client, SET_SAT, 0);
     ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
+    // Subcribe stop topic
+    msg_id = esp_mqtt_client_subscribe(client, STOP_TOPIC, 0);
+    ESP_LOGI(TAG, "sent subscribe successful, msg_id=%d", msg_id);
 
     break;
   case MQTT_EVENT_DISCONNECTED:
@@ -456,6 +493,10 @@ static void mqtt_event_handler(void *handler_args, esp_event_base_t base,
     } else if (memcmp(event->topic, CHECK_TRACK, event->topic_len) == 0) {
       printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
       printf("DATA=%.*s\r\n", event->data_len, event->data);
+      // } else if (memcmp(event->topic, STOP_TOPIC, event->topic_len) == 0) {
+      //   printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
+      //   printf("DATA=%.*s\r\n", event->data_len, event->data);
+      // xEventGroupSetBits(stop_event_group, STOP_BIT);
     } else if (memcmp(event->topic, CHECK_SERVER, event->topic_len) == 0) {
       printf("TOPIC=%.*s\r\n", event->topic_len, event->topic);
       printf("DATA=%.*s\r\n", event->data_len, event->data);
@@ -518,6 +559,18 @@ void mqtt_task(void *pvParameters) {
   }
 }
 
+void gps_task(void *pvParameters) {
+  gps_data_t gps;
+  while (1) {
+    xQueueReceive(gps_queue, &gps, portMAX_DELAY);
+    char message[20];
+    sprintf(message, "%.3f %.3f %d", gps.longitude, gps.latitude,
+            (int)(gps.altitude));
+    esp_mqtt_client_publish(client, "/topic/location", message, 0, 0, 0);
+    break;
+  }
+  vTaskDelete(NULL);
+}
 // MQTT end
 
 // Rotator
@@ -556,12 +609,47 @@ void sg90_init() {
 }
 // Rotator end
 
-// Calculate declination angle and reset
-void sg90_reset_angle() {
+// Calculate declination angle, gps and reset
+void set_up_track() {
   servo_set_angle(MCPWM_UNIT_0, MCPWM_TIMER_0, 0);
   vTaskDelay(pdMS_TO_TICKS(500));
-  Euler_angles angle_1 = get_sen_data();
-  vTaskDelay(pdMS_TO_TICKS(200));
-  Euler_angles angle_2 = get_sen_data();
-  sg90_angle_declination = (angle_1.pitch + angle_2.pitch) / 2;
+  Euler_angles angle = get_sen_data();
+  vTaskDelay(pdMS_TO_TICKS(50));
+  sg90_angle_declination = angle.pitch;
+  gps_data_t gps = GPS_get_data();
+  if (gps.longitude == 0) {
+    int count = 1;
+    while (count <= 10) {
+      Euler_angles angle_1 = get_sen_data();
+      gps_data_t gps_1 = GPS_get_data();
+      sg90_angle_declination = (sg90_angle_declination + angle_1.pitch) / 2;
+      if (gps_1.longitude != 0) {
+        gps.altitude = gps_1.altitude;
+        gps.longitude = gps_1.longitude;
+        gps.latitude = gps_1.latitude;
+        break;
+      }
+      vTaskDelay(pdMS_TO_TICKS(100));
+      count++;
+    }
+  }
+  if (gps.longitude != 0) {
+    xQueueSend(gps_queue, &gps, pdMS_TO_TICKS(1000));
+  }
 }
+
+// void stop_task(void *pvParameters) {
+//   while (1) {
+//     xEventGroupWaitBits(stop_event_group, STOP_BIT, pdFALSE, pdTRUE,
+//                         portMAX_DELAY);
+
+//     // if (timer_is_running) {
+//     //   esp_timer_stop(periodic_timer);
+//     //   timer_is_running = false;
+//     // }
+//     // set_sat = false;
+//     printf("Tracker stopped!!!!!!!!!!!!!!!!!!!!");
+//     xEventGroupClearBits(stop_event_group, STOP_BIT);
+//     vTaskDelay(pdMS_TO_TICKS(1000));
+//   }
+// }

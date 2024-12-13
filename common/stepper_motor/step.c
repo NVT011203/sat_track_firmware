@@ -38,7 +38,7 @@ void rotate_motor(float angle, int direction, int *num_of_steps) {
   // Rotate
   for (int i = 0; i < steps; i++) {
     gpio_set_level(STEP_PIN, 1);
-    esp_rom_delay_us(STEP_DELAY_US); // Delay
+    esp_rom_delay_us(STEP_DELAY_US);
     gpio_set_level(STEP_PIN, 0);
     esp_rom_delay_us(STEP_DELAY_US);
   }

@@ -40,8 +40,8 @@ void qmc5883l_init() {
   ESP_ERROR_CHECK(qmc5883l_write_byte(QMC5883L_REG_SET_RESET, 0x01,
                                       I2C_MASTER_PORT)); // Perform soft reset
   ESP_ERROR_CHECK(qmc5883l_write_byte(
-      QMC5883L_REG_CONTROL, 0x1D,
-      I2C_MASTER_PORT)); // Continuous mode, 200Hz, RNG=8G, OSR=512
+      QMC5883L_REG_CONTROL, 0x15,
+      I2C_MASTER_PORT)); // Continuous mode, 10Hz, RNG=8G, OSR=512
 }
 
 void qmc5883l_read_magnetometer(int16_t *x, int16_t *y, int16_t *z) {
